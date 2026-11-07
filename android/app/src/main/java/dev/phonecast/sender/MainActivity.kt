@@ -24,6 +24,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -41,6 +42,7 @@ import kotlinx.coroutines.flow.update
 class MainActivity : ComponentActivity() {
 
     private lateinit var projectionManager: MediaProjectionManager
+    internal lateinit var discovery: ReceiverDiscovery
 
     // Fresh consent for every session: the token from a previous dialog is
     // never reused (Android 14+ requires it, and it's just correct).
@@ -63,12 +65,26 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             notificationsLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        discovery = ReceiverDiscovery(applicationContext).also { it.start() }
+        saved = SavedSettings(this)
+        settings = SenderSettings(saved.host, saved.tcpPort, saved.udpPort, saved.token)
         setContent {
             MaterialTheme { PhoneCastScreen(applicationContext) }
         }
     }
 
+    override fun onDestroy() {
+        // Never leave the multicast subscription running behind the UI.
+        if (::discovery.isInitialized) discovery.stop()
+        super.onDestroy()
+    }
+
     private fun startStreaming(resultCode: Int, resultData: Intent) {
+        // Persist whatever is on screen; the next launch starts from it.
+        saved.host = settings.host
+        saved.tcpPort = settings.tcpPort
+        saved.udpPort = settings.udpPort
+        saved.token = settings.token
         val intent = Intent(this, StreamService::class.java).apply {
             action = StreamService.ACTION_START
             putExtra(StreamService.EXTRA_HOST, settings.host)
@@ -81,9 +97,12 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, intent)
     }
 
-    // Held by the Activity so entries survive rotation; a real config store
-    // (persisted across launches) arrives with milestone 5.
-    internal val settings = SenderSettings()
+    private lateinit var saved: SavedSettings
+
+    // Assigned in onCreate before setContent; fields are mutableStateOf so
+    // edits survive rotation; seeded from and written back to
+    // SharedPreferences (milestone 5).
+    internal lateinit var settings: SenderSettings
 
     companion object {
         fun stop(context: Context) {
@@ -99,11 +118,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-class SenderSettings {
-    var host by mutableStateOf("")
-    var tcpPort by mutableStateOf("53000")
-    var udpPort by mutableStateOf("53001")
-    var token by mutableStateOf("")
+class SenderSettings(
+    initialHost: String = "",
+    initialTcp: String = "53000",
+    initialUdp: String = "53001",
+    initialToken: String = "",
+) {
+    var host by mutableStateOf(initialHost)
+    var tcpPort by mutableStateOf(initialTcp)
+    var udpPort by mutableStateOf(initialUdp)
+    var token by mutableStateOf(initialToken)
 }
 
 @Composable
@@ -156,11 +180,46 @@ fun PhoneCastScreen(context: Context) {
             OutlinedTextField(
                 value = state.token,
                 onValueChange = { state.token = it },
-                label = { Text("Pairing token (optional until milestone 5)") },
+                label = { Text("Pairing token (must match the receiver's config)") },
                 singleLine = true,
                 enabled = !ui.running,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            val discovered by activity.discovery.found.collectAsStateWithLifecycle()
+            if (discovered.isNotEmpty() && !ui.running) {
+                Text("Discovered receivers", style = MaterialTheme.typography.titleSmall)
+                discovered.values.sortedBy { it.name }.forEach { r ->
+                    OutlinedCard(
+                        onClick = {
+                            state.host = r.host
+                            state.tcpPort = r.tcpPort.toString()
+                            state.udpPort = r.udpPort.toString()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column {
+                                Text(r.name)
+                                Text(
+                                    "${r.host}:${r.tcpPort}  (audio udp ${r.udpPort})",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            if (r.needsToken && state.token.isEmpty()) {
+                                Text(
+                                    "token\nrequired",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
