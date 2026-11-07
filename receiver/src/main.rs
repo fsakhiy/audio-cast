@@ -3,6 +3,10 @@
 //! Default mode: listen for a PhoneCast sender (TCP control + UDP audio, see
 //! docs/protocol.md) and play what arrives to the output device. `--tone`
 //! keeps the milestone-1 behavior: play a locally generated sine wave.
+//!
+//! Settings resolve in the order **CLI flag > config file > default**; the
+//! config file lives at the OS-standard location (see `platform.rs`) unless
+//! `--config` says otherwise.
 
 use std::time::Duration;
 
@@ -10,11 +14,15 @@ use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+mod config;
 mod drift;
 mod jitter;
+mod mdns;
 mod net;
+mod platform;
 mod playout;
 mod tone;
+use config::{CliOverrides, Effective};
 use tone::Tone;
 
 #[derive(Parser)]
@@ -28,6 +36,24 @@ struct Cli {
     #[arg(short, long)]
     list: bool,
 
+    /// Config file path. Default: %APPDATA%\PhoneCast\config.toml on
+    /// Windows, ~/.config/phonecast/config.toml on Linux.
+    #[arg(long, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
+
+    /// Write a commented example config to the default location and exit.
+    #[arg(long)]
+    write_example_config: bool,
+
+    /// Register login autostart (Windows: HKCU Run key; Linux: systemd user
+    /// service). The launched instance reads the default config file.
+    #[arg(long)]
+    install_autostart: bool,
+
+    /// Undo --install-autostart.
+    #[arg(long)]
+    remove_autostart: bool,
+
     /// Output device to use, matched case-insensitively against device names.
     /// Defaults to the system default output device.
     #[arg(short, long, value_name = "NAME")]
@@ -39,31 +65,38 @@ struct Cli {
 
     /// Address to bind the control (TCP) and audio (UDP) ports to.
     /// Keep it LAN-only; never expose these ports to the internet.
-    #[arg(long, default_value = "0.0.0.0")]
-    bind: std::net::IpAddr,
+    #[arg(long)]
+    bind: Option<String>,
 
     /// TCP control port (handshake + session lease).
-    #[arg(long, default_value_t = 53000)]
-    tcp_port: u16,
+    #[arg(long)]
+    tcp_port: Option<u16>,
 
     /// UDP audio port.
-    #[arg(long, default_value_t = 53001)]
-    udp_port: u16,
+    #[arg(long)]
+    udp_port: Option<u16>,
 
     /// Pairing token that senders must present in the handshake.
-    /// Empty (default) accepts any sender — LAN trust only; enforcement with
-    /// a config file arrives in milestone 5.
-    #[arg(long, default_value = "")]
-    token: String,
+    /// Empty accepts any sender — LAN trust only.
+    #[arg(long)]
+    token: Option<String>,
 
     /// Base jitter buffer target in ms (10–200). The buffer grows
     /// beyond this automatically when network jitter or loss demands it.
-    #[arg(long, default_value_t = 30.0)]
-    jitter_target_ms: f64,
+    #[arg(long)]
+    jitter_target_ms: Option<f64>,
 
     /// Extra playout delay in ms for lip-sync (0–2000).
-    #[arg(long, default_value_t = 0.0)]
-    extra_delay_ms: f64,
+    #[arg(long)]
+    extra_delay_ms: Option<f64>,
+
+    /// Disable mDNS advertising of _phonecast._tcp.local.
+    #[arg(long)]
+    no_mdns: bool,
+
+    /// Append logs to this file instead of the console (for autostart).
+    #[arg(long, value_name = "PATH")]
+    log_file: Option<std::path::PathBuf>,
 
     /// Test tone frequency in Hz (tone mode). Must stay below half the sample rate.
     #[arg(long, default_value_t = 440.0)]
@@ -93,8 +126,61 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    init_logging();
     let cli = Cli::parse();
+
+    // One-shot maintenance actions: no audio, no sockets.
+    if cli.write_example_config {
+        let path = match &cli.config {
+            Some(p) => p.clone(),
+            None => platform::default_config_path()
+                .context("no default config location on this OS; pass --config")?,
+        };
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+        std::fs::write(&path, config::EXAMPLE)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        println!("wrote example config to {}", path.display());
+        return Ok(());
+    }
+    if cli.install_autostart {
+        println!("{}", platform::install_autostart()?);
+        return Ok(());
+    }
+    if cli.remove_autostart {
+        println!("{}", platform::remove_autostart()?);
+        return Ok(());
+    }
+
+    // Config file: explicit --config must exist; the default location is
+    // used when present, silently skipped when absent.
+    let cfg_path = match &cli.config {
+        Some(p) => Some(p.clone()),
+        None => platform::default_config_path().filter(|p| p.exists()),
+    };
+    let file = match &cfg_path {
+        Some(p) => config::FileConfig::load(p)?,
+        None => config::FileConfig::default(),
+    };
+
+    let overrides = CliOverrides {
+        token: cli.token.clone(),
+        bind: cli.bind.clone(),
+        tcp_port: cli.tcp_port,
+        udp_port: cli.udp_port,
+        device: cli.device.clone(),
+        jitter_target_ms: cli.jitter_target_ms,
+        extra_delay_ms: cli.extra_delay_ms,
+        mdns_off: if cli.no_mdns { Some(true) } else { None },
+        log_file: cli.log_file.as_ref().map(|p| p.display().to_string()),
+    };
+    let eff = Effective::build(&overrides, &file)?;
+
+    init_logging(eff.log_file.as_deref())?;
+    if let Some(p) = &cfg_path {
+        tracing::info!(path = %p.display(), "loaded config file");
+    }
 
     let host = cpal::default_host();
 
@@ -102,27 +188,20 @@ fn run() -> Result<()> {
         return list_devices(&host);
     }
 
-    let device = pick_device(&host, cli.device.as_deref())?;
+    let device = pick_device(&host, eff.device.as_deref())?;
     if cli.tone {
         run_tone(&cli, &device)
     } else {
-        // clap's range parser is awkward for floats; validate here instead,
-        // mirroring how --volume is handled.
-        if !(10.0..=200.0).contains(&cli.jitter_target_ms) {
-            bail!("--jitter-target-ms must be between 10 and 200");
-        }
-        if !(0.0..=2000.0).contains(&cli.extra_delay_ms) {
-            bail!("--extra-delay-ms must be between 0 and 2000");
-        }
         net::run(
             &device,
             &net::ListenArgs {
-                bind: cli.bind,
-                tcp_port: cli.tcp_port,
-                udp_port: cli.udp_port,
-                token: cli.token.clone(),
-                jitter_target_ms: cli.jitter_target_ms,
-                extra_delay_ms: cli.extra_delay_ms,
+                bind: eff.bind,
+                tcp_port: eff.tcp_port,
+                udp_port: eff.udp_port,
+                token: eff.token,
+                jitter_target_ms: eff.jitter_target_ms,
+                extra_delay_ms: eff.extra_delay_ms,
+                mdns: eff.mdns,
             },
         )
     }
@@ -287,12 +366,30 @@ fn pick_device(host: &cpal::Host, needle: Option<&str>) -> Result<cpal::Device> 
     }
 }
 
-fn init_logging() {
+fn init_logging(log_file: Option<&str>) -> Result<()> {
     // RUST_LOG wins if set; otherwise log at info and above.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    match log_file {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("failed to open log file {path}"))?;
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(file)
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .init();
+        }
+    }
+    Ok(())
 }

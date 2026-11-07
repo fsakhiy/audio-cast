@@ -68,6 +68,7 @@ pub struct ListenArgs {
     pub token: String,
     pub jitter_target_ms: f64,
     pub extra_delay_ms: f64,
+    pub mdns: bool,
 }
 
 pub fn run(device: &cpal::Device, args: &ListenArgs) -> Result<()> {
@@ -89,6 +90,34 @@ pub fn run(device: &cpal::Device, args: &ListenArgs) -> Result<()> {
         extra_delay_ms = args.extra_delay_ms,
         "listening — LAN use only, do not expose these ports to the internet"
     );
+    let hint = crate::platform::firewall_hint(args.udp_port, args.tcp_port);
+    if !hint.is_empty() {
+        tracing::info!("{hint}");
+    }
+
+    // mDNS advertising; the daemon must outlive the accept loop below.
+    let _mdns = if args.mdns {
+        let ips = crate::mdns::advertise_ips(args.bind);
+        if ips.is_empty() {
+            if args.bind.is_unspecified() {
+                tracing::warn!("no non-loopback IPv4 interfaces found; not advertising via mDNS");
+            }
+            None
+        } else {
+            match crate::mdns::advertise(&ips, args.tcp_port, args.udp_port, !args.token.is_empty()) {
+                Ok((daemon, names)) => {
+                    tracing::info!(services = %names.join(", "), "advertising _phonecast._tcp.local via mDNS");
+                    Some(daemon)
+                }
+                Err(err) => {
+                    tracing::warn!("{err:#}; continuing without mDNS");
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     let shared = Arc::new(Shared {
         current: Mutex::new(None),
