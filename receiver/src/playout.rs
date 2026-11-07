@@ -167,8 +167,7 @@ impl Playout {
         // (a skip, like aggressive fast-forward) for latency — the right
         // call for a live stream, where stale audio is worthless.
         if level - target > 200.0 {
-            let mut flush_target_us =
-                ((level - target - 50.0) * 1_000.0) as u64;
+            let mut flush_target_us = ((level - target - 50.0) * 1_000.0) as u64;
             while flush_target_us > 0 {
                 match jitter.pop() {
                     Some(frame) => {
@@ -295,7 +294,11 @@ mod tests {
         }
         let out = p.tick(0.01, 0, &mut jitter);
         assert!(!out.is_empty());
-        assert!(p.flushed_frames > 80, "should chew through the burst: {}", p.flushed_frames);
+        assert!(
+            p.flushed_frames > 80,
+            "should chew through the burst: {}",
+            p.flushed_frames
+        );
         // Now the level sits near the cushion, not near 500 ms.
         let level = p.level_ms(0, &jitter);
         assert!(level < 120.0, "level after flush: {level}");
@@ -316,7 +319,10 @@ mod tests {
         assert!(p.started);
         jitter.clear();
         p.tick(0.01, 960, &mut jitter);
-        assert_eq!(p.underrun_ticks, 1, "one starved tick must count as one, not per pad frame");
+        assert_eq!(
+            p.underrun_ticks, 1,
+            "one starved tick must count as one, not per pad frame"
+        );
     }
 
     #[test]

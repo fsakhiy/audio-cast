@@ -55,9 +55,19 @@ struct Cli {
     repeat: bool,
 
     /// Frames (samples per channel) per UDP datagram; lowered if needed to
-    /// respect the 1200-byte datagram cap.
+    /// respect the 1200-byte datagram cap. Ignored for Opus (fixed 960 = 20 ms).
     #[arg(long, default_value_t = 240)]
     frame_size: u16,
+
+    /// Wire codec: pcm (raw, like the phone today) or opus (20 ms frames).
+    #[arg(long, value_enum, default_value_t = CodecArg::Pcm)]
+    codec: CodecArg,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CodecArg {
+    Pcm,
+    Opus,
 }
 
 fn main() {
@@ -99,14 +109,32 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
         bail!("WAV must have 1 or 2 channels (got {})", spec.channels);
     }
 
-    let mut frame_size = cli.frame_size;
-    while frame_size > 1
-        && frame_size as usize * spec.channels as usize * 2 + AUDIO_HEADER_SIZE > 1200
-    {
-        frame_size /= 2;
-    }
+    let use_opus = cli.codec == CodecArg::Opus;
+    let frame_size = if use_opus {
+        if spec.sample_rate != 48_000 {
+            bail!(
+                "opus requires a 48 kHz WAV (got {} Hz); resample the file first",
+                spec.sample_rate
+            );
+        }
+        // docs/protocol.md: one Opus frame per datagram; 20 ms recommended.
+        960u16
+    } else {
+        let mut frame_size = cli.frame_size;
+        while frame_size > 1
+            && frame_size as usize * spec.channels as usize * 2 + AUDIO_HEADER_SIZE > 1200
+        {
+            frame_size /= 2;
+        }
+        frame_size
+    };
+    let wire_codec = if use_opus {
+        Codec::Opus
+    } else {
+        Codec::PcmS16Le
+    };
     let handshake = Handshake {
-        codec: Codec::PcmS16Le,
+        codec: wire_codec,
         channels: spec.channels as u8,
         sample_rate: spec.sample_rate,
         frame_size,
@@ -115,6 +143,16 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
     if !handshake.fits_mtu() {
         bail!("--frame-size {frame_size} cannot fit the 1200-byte datagram cap");
     }
+    let mut encoder = if use_opus {
+        let ch = if spec.channels == 1 {
+            opus::Channels::Mono
+        } else {
+            opus::Channels::Stereo
+        };
+        Some(opus::Encoder::new(48_000, ch, opus::Application::Audio)?)
+    } else {
+        None
+    };
 
     // Control connection: also the session lease. Closing it ends playback
     // on the receiver, so we hold it until the very end.
@@ -147,7 +185,14 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
     );
 
     let samples_per_packet = frame_size as usize * spec.channels as usize;
-    let mut packet_buf = vec![0u8; AUDIO_HEADER_SIZE + samples_per_packet * 2];
+    // Payload room: raw PCM size, or enough for a worst-case Opus frame
+    // while keeping the datagram under the 1200-byte cap.
+    let payload_capacity = if use_opus {
+        1200 - AUDIO_HEADER_SIZE
+    } else {
+        samples_per_packet * 2
+    };
+    let mut packet_buf = vec![0u8; AUDIO_HEADER_SIZE + payload_capacity];
     let frame_duration = Duration::from_secs_f64(frame_size as f64 / spec.sample_rate as f64);
     // Give the receiver a head start: 200 ms of audio goes out as a burst
     // before real-time pacing begins. (Kept modest: an excess burst only
@@ -182,19 +227,36 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
                 }
                 break 'file;
             }
-            // Encode only the samples actually read; the final packet may
-            // be shorter than a full frame (payload_len declares the size).
-            let used_bytes = read * 2;
-            let payload = &mut packet_buf[AUDIO_HEADER_SIZE..AUDIO_HEADER_SIZE + used_bytes];
-            // read samples are 2 bytes each, so the payload splits evenly
-            for (bytes, sample) in payload
-                .as_chunks_mut::<2>()
-                .0
-                .iter_mut()
-                .zip(&sample_slot[..read])
-            {
-                bytes.copy_from_slice(&sample.to_le_bytes());
-            }
+            let used_bytes = if use_opus {
+                // Opus frames are fixed-size; pad the final partial frame
+                // with silence (audible only at stream end anyway).
+                for slot in &mut sample_slot[read..] {
+                    *slot = 0;
+                }
+                let encoder = encoder.as_mut().expect("opus encoder created above");
+                let payload = &mut packet_buf[AUDIO_HEADER_SIZE..];
+                let n = encoder.encode(&sample_slot, payload)?;
+                if n + AUDIO_HEADER_SIZE > 1200 {
+                    bail!(
+                        "opus produced a {n}-byte frame; datagram would exceed 1200 bytes — lower the bitrate"
+                    );
+                }
+                n
+            } else {
+                // PCM: write exactly the samples read; the final packet may
+                // be shorter (payload_len declares the size).
+                let bytes = read * 2;
+                let payload = &mut packet_buf[AUDIO_HEADER_SIZE..AUDIO_HEADER_SIZE + bytes];
+                for (out, sample) in payload
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(&sample_slot[..read])
+                {
+                    out.copy_from_slice(&sample.to_le_bytes());
+                }
+                bytes
+            };
 
             // Pace: never run ahead of the session clock; if we fall behind
             // (coarse Windows timer, slow disk), catch up by sending sooner.
@@ -204,7 +266,7 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
             }
             let capture_ts_us = (next_target - start).as_micros() as u64;
             let header = AudioHeader {
-                codec: Codec::PcmS16Le,
+                codec: wire_codec,
                 sequence,
                 capture_ts_us,
             };

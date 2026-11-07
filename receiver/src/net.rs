@@ -32,6 +32,14 @@ use ringbuf::{
 use crate::jitter::{Frame, JitterBuffer};
 use crate::playout::{Playout, PlayoutConfig};
 
+/// Opus decoder plus its reusable output scratch (samples per channel,
+/// max 120 ms at 48 kHz = 5760). Lives on the UDP thread behind one Mutex
+/// so decode + scratch access stay in lockstep.
+struct DecodeState {
+    decoder: opus::Decoder,
+    scratch: Vec<i16>,
+}
+
 /// The live session, if any. UDP pushes here; the playout thread pops.
 pub struct Session {
     pub channels: usize,
@@ -40,6 +48,9 @@ pub struct Session {
     /// Expected payload bytes per PCM datagram (validated).
     pub frame_payload_bytes: usize,
     pub jitter: Mutex<JitterBuffer>,
+    /// Some for Opus sessions, None for PCM. Private: DecodeState wraps the
+    /// non-Sync-friendly scratch and must stay inside this module.
+    decode: Option<Mutex<DecodeState>>,
     /// Cleared when the lease closes; threads wind down on it.
     pub running: AtomicBool,
 }
@@ -137,16 +148,35 @@ fn handle_session(
     {
         return reject(&mut stream, Status::ParamsUnsupported);
     }
-    if hs.codec == Codec::Opus {
-        return reject(&mut stream, Status::CodecUnsupported); // wired in the next commit
-    }
-    if hs.codec != Codec::PcmS16Le {
+    if hs.codec != Codec::PcmS16Le && hs.codec != Codec::Opus {
         return reject(&mut stream, Status::CodecUnsupported);
     }
     if !args.token.is_empty() && hs.token != args.token {
         tracing::warn!(%peer, "handshake rejected: token mismatch");
         return reject(&mut stream, Status::TokenRejected);
     }
+
+    // Opus sessions get a decoder (48 kHz is enforced by hs.fits_mtu()).
+    let decode = match hs.codec {
+        Codec::Opus => {
+            let channels = if hs.channels == 1 {
+                opus::Channels::Mono
+            } else {
+                opus::Channels::Stereo
+            };
+            match opus::Decoder::new(48_000, channels) {
+                Ok(decoder) => Some(Mutex::new(DecodeState {
+                    decoder,
+                    scratch: vec![0i16; 5_760 * hs.channels as usize],
+                })),
+                Err(err) => {
+                    tracing::warn!(%peer, %err, "failed to create opus decoder");
+                    return reject(&mut stream, Status::CodecUnsupported);
+                }
+            }
+        }
+        Codec::PcmS16Le => None,
+    };
 
     // Open the output stream at the negotiated rate BEFORE telling the
     // sender OK — a device that rejects the rate answers ParamsUnsupported
@@ -176,6 +206,7 @@ fn handle_session(
             hs.sample_rate,
             args.jitter_target_ms,
         )),
+        decode,
         running: AtomicBool::new(true),
     });
 
@@ -394,21 +425,50 @@ fn udp_loop(udp: UdpSocket, shared: Arc<Shared>) {
             shared.no_session.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        if header.codec != Codec::PcmS16Le || session.codec != Codec::PcmS16Le {
-            shared.bad_packets.fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        if payload.len() != session.frame_payload_bytes {
+        if header.codec != session.codec {
             shared.bad_packets.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
-        let samples: Vec<i16> = payload
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
-            .collect();
+        let samples: Vec<i16> = match session.codec {
+            Codec::PcmS16Le => {
+                if payload.len() != session.frame_payload_bytes {
+                    shared.bad_packets.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                payload
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect()
+            }
+            Codec::Opus => {
+                // Decode on the network thread; the playout thread only
+                // ever sees PCM frames regardless of the wire codec.
+                let Some(decode) = &session.decode else {
+                    shared.bad_packets.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let mut st = lock(decode);
+                // Destructure so decoder and scratch are separate mutable
+                // borrows (one struct field can't borrow another).
+                let DecodeState { decoder, scratch } = &mut *st;
+                match decoder.decode(payload, scratch, false) {
+                    Ok(samples_per_channel) => {
+                        let total = samples_per_channel * session.channels;
+                        st.scratch[..total].to_vec()
+                    }
+                    Err(err) => {
+                        // Corrupt/truncated payload: count and move on; the
+                        // jitter buffer's gap policy covers the audio hole.
+                        tracing::debug!("opus decode failed: {err}");
+                        shared.bad_packets.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                }
+            }
+        };
         let frame = Frame::pcm(
             header.sequence,
             header.capture_ts_us,
@@ -483,4 +543,54 @@ fn open_playback_stream<S: cpal::SizedSample + cpal::FromSample<f32>>(
                 config.sample_rate.0
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use phonecast_wire::{AudioHeader, Codec};
+
+    /// Encode -> header round-trip -> decode, the exact chain a datagram
+    /// takes; guards the codec plumbing against silent format drift.
+    #[test]
+    fn opus_roundtrip_through_wire_header() {
+        // 20 ms stereo 440 Hz tone at half scale.
+        let rate = 48_000usize;
+        let samples: Vec<i16> = (0..960 * 2)
+            .map(|i| {
+                let t = (i / 2) as f64 / rate as f64;
+                (440.0 * std::f64::consts::TAU * t).sin() * 16_000.0
+            })
+            .map(|v| v as i16)
+            .collect();
+
+        let mut enc =
+            opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Audio).unwrap();
+        let packet = enc.encode_vec(&samples, 1_100).unwrap();
+        assert!(packet.len() + phonecast_wire::AUDIO_HEADER_SIZE <= 1_200);
+
+        // Build the datagram as the sender would, then parse like the receiver.
+        let header = AudioHeader {
+            codec: Codec::Opus,
+            sequence: 42,
+            capture_ts_us: 20_000,
+        };
+        let mut datagram = header.encode(packet.len() as u16).to_vec();
+        datagram.extend_from_slice(&packet);
+        let (parsed, payload) = AudioHeader::parse(&datagram).unwrap();
+        assert_eq!(parsed.sequence, 42);
+        assert_eq!(parsed.codec, Codec::Opus);
+
+        let mut dec = opus::Decoder::new(48_000, opus::Channels::Stereo).unwrap();
+        let mut out = vec![0i16; 5_760 * 2];
+        let n = dec.decode(payload, &mut out, false).unwrap();
+        assert_eq!(n, 960, "20 ms at 48 kHz");
+        // Round-tripped audio must carry real energy near the input level.
+        let rms = (out[..n * 2]
+            .iter()
+            .map(|&s| (s as f64).powi(2))
+            .sum::<f64>()
+            / (n * 2) as f64)
+            .sqrt();
+        assert!(rms > 8_000.0 && rms < 20_000.0, "rms {rms}");
+    }
 }

@@ -135,10 +135,21 @@ impl Handshake {
         })
     }
 
-    /// Spec's datagram-size rule, checked on both sides.
+    /// Spec's datagram-size rule, checked on both sides. PCM payloads are
+    /// fixed by frame_size; Opus payloads are whatever the encoder produced
+    /// and are validated per-datagram by the receiver instead (the sender
+    /// must still respect the cap — see docs/protocol.md).
     pub fn fits_mtu(&self) -> bool {
-        self.frame_size as usize * self.channels as usize * 2 + AUDIO_HEADER_SIZE
-            <= MAX_DATAGRAM_BYTES
+        match self.codec {
+            Codec::PcmS16Le => {
+                self.frame_size as usize * self.channels as usize * 2 + AUDIO_HEADER_SIZE
+                    <= MAX_DATAGRAM_BYTES
+            }
+            Codec::Opus => {
+                // Opus runs at its native rate only, per docs/protocol.md.
+                self.sample_rate == 48_000 && self.frame_size <= 5_760
+            }
+        }
     }
 }
 
@@ -346,6 +357,20 @@ mod tests {
         let mut h = hs();
         h.frame_size = 480;
         assert!(!h.fits_mtu());
+    }
+
+    #[test]
+    fn opus_rules_from_spec() {
+        // Opus: native 48 kHz, frame up to 120 ms; payload MTU checked per
+        // datagram, not by the PCM size formula.
+        let mut h = hs();
+        h.codec = Codec::Opus;
+        h.frame_size = 960; // the spec's recommended 20 ms
+        assert!(h.fits_mtu());
+        let mut h = hs();
+        h.codec = Codec::Opus;
+        h.sample_rate = 44_100;
+        assert!(!h.fits_mtu(), "opus requires 48 kHz per spec");
     }
 
     #[test]

@@ -79,6 +79,18 @@ offset  size  field
 For `codec = pcm_s16le` the payload is `frame_size × channels` interleaved
 signed 16-bit little-endian samples (frame-major: L0 R0 L1 R1 …).
 
+For `codec = opus` (live as of milestone 4):
+- `sample_rate` in the handshake MUST be 48000 (Opus's native rate; the
+  decoder resamples internally if a different playback rate is ever needed).
+- Each datagram carries exactly one Opus frame. `frame_size` in the
+  handshake declares the nominal samples per channel per frame; the
+  receiver decodes and sizes output from the packet itself. Recommended
+  value: **960 samples (20 ms)** — best quality/bandwidth for music.
+- The 1200-byte datagram cap still applies: the sender must keep encoded
+  payload + 18-byte header under the cap (lower the bitrate if it doesn't).
+- The receiver validates the declared header codec against the session
+  codec and drops mismatches.
+
 The capture timestamp is the sender's monotonic clock at the moment the
 samples left the capture callback. The receiver does not interpret its unit
 beyond monotonicity; latency measurement uses it from milestone 4 on.
@@ -103,9 +115,26 @@ buffer and sequence counters are discarded and further UDP datagrams are
 ignored until a new handshake. The output stream is torn down; the next
 handshake may negotiate different parameters.
 
+## Receiver buffering behavior (milestone 4)
+
+The wire format does not change for buffering; the receiver's policy:
+
+- Frames queue in a jitter buffer with an adaptive target:
+  `base (default 30 ms, --jitter-target-ms 10–200) + 4 × inter-arrival
+  EMA + bumps on loss events`, clamped to 10–200 ms.
+- Sequence gaps are gap-filled with silence so playout never skips past
+  the lost audio (keeps lip-sync honest). A reordered frame that arrives
+  before its (silence-filled) slot plays out replaces the silence.
+- Late frames that fall behind the play watermark are dropped and counted.
+- Buffer overflow evicts the OLDEST frames.
+- Clock drift is corrected with a playout ratio capped at ±0.05 %, so long
+  sessions neither drift nor audible-pitch-shift. Levels far above target
+  (> target + 200 ms, e.g. a bursty sender's prefill) are recovered by
+  discarding whole frames rather than waiting on the capped ratio.
+- `--extra-delay-ms` adds manual playout hold for lip-sync.
+
 ## Future milestones touching this document
 
-- M4: jitter buffer params in the payload or header? (decision pending there)
-- M4: `codec = 1` (Opus): one Opus frame per datagram, 120 samples (2.5 ms)
-  or 240 samples (5 ms) per frame.
 - M5: pairing token semantics, discovery via mDNS (service `_phonecast._udp`).
+- Later: phone-side Opus encode (NDK libopus; Android's MediaCodec has no
+  Opus encoder). PCM remains the phone default until then.
