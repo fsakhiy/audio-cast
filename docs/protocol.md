@@ -130,6 +130,39 @@ beyond monotonicity; latency measurement uses it from milestone 4 on.
   Ring-full drops the new packet (counted as overrun).
 - Clock-drift correction and adaptive buffering: milestone 4.
 
+## Status: receiver -> sender telemetry (milestone 6)
+
+Roughly once per second the receiver sends a **fixed 24-byte** UDP packet
+back to the source address of the most recent accepted audio datagram:
+
+```
+offset  size  field
+0       2     magic: "PS"
+2       1     version: 1
+3       1     kind: 0 = receiver status
+4       8     lost frames (u64)
+12      4     late/reordered frames (u32)
+16      2     current jitter target, ms (u16)
+18      2     jitter-buffer content, ms (u16)
+20      2     estimated pipeline latency, ms (u16, saturating)
+22      2     reserved: 0
+```
+
+Estimation caveats, in honesty order:
+
+- There is no clock sync between the two machines. The receiver min-filters
+  (arrival_time - capture_timestamp) per session; the *difference* between
+  the current sample and that minimum measures the queuing variability only.
+- Therefore `latency` is a **lower-bound estimate** of
+  capture -> DAC-start delay: it includes buffer + ring depth + variable
+  network queuing, and excludes the constant part (LAN propagation and
+  the two DAC/ADC stages, ~1-3 ms plus device buffers).
+- A receiver with a brand-new session has no baseline: latency reports the
+  buffer term alone until the first sample arrives.
+
+Senders MUST ignore unrecognized UDP packets on the audio port (status is
+fire-and-forget; a lost status packet is not an error condition).
+
 ## Session teardown
 
 When the TCP connection closes, the receiver ends the session: the ring

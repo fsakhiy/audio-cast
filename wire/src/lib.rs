@@ -71,7 +71,7 @@ pub struct Handshake {
     pub token: String,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Eq, Error)]
 pub enum DecodeError {
     #[error("expected {expected} bytes, got {got}")]
     TooShort { expected: usize, got: usize },
@@ -164,6 +164,61 @@ fn decode_token(raw: &[u8]) -> Result<String, DecodeError> {
     std::str::from_utf8(&raw[..end])
         .map(|s| s.to_owned())
         .map_err(|_| DecodeError::BadToken)
+}
+
+/// Receiver -> sender status packet (docs/protocol.md "Status"): fixed
+/// 24 bytes, sent ~1/s to the UDP source address of the last audio
+/// datagram. Senders may ignore anything they don't understand.
+pub const STATUS_MAGIC: [u8; 2] = *b"PS";
+pub const STATUS_SIZE: usize = 24;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusPacket {
+    pub lost_frames: u64,
+    pub late_frames: u32,
+    pub jitter_target_ms: u16,
+    pub buffered_ms: u16,
+    /// Receiver's estimate of sender-capture -> DAC-start delay, ms.
+    /// Saturates at u16::MAX.
+    pub latency_est_ms: u16,
+}
+
+impl StatusPacket {
+    pub fn encode(&self) -> [u8; STATUS_SIZE] {
+        let mut b = [0u8; STATUS_SIZE];
+        b[0..2].copy_from_slice(&STATUS_MAGIC);
+        b[2] = PROTOCOL_VERSION;
+        b[3] = 0; // kind: receiver status
+        b[4..12].copy_from_slice(&self.lost_frames.to_le_bytes());
+        b[12..16].copy_from_slice(&self.late_frames.to_le_bytes());
+        b[16..18].copy_from_slice(&self.jitter_target_ms.to_le_bytes());
+        b[18..20].copy_from_slice(&self.buffered_ms.to_le_bytes());
+        b[20..22].copy_from_slice(&self.latency_est_ms.to_le_bytes());
+        // 22..24 reserved zeros
+        b
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() < STATUS_SIZE {
+            return Err(DecodeError::TooShort {
+                expected: STATUS_SIZE,
+                got: bytes.len(),
+            });
+        }
+        if bytes[0..2] != STATUS_MAGIC {
+            return Err(DecodeError::BadMagic);
+        }
+        if bytes[2] != PROTOCOL_VERSION {
+            return Err(DecodeError::UnsupportedVersion(bytes[2]));
+        }
+        Ok(Self {
+            lost_frames: u64::from_le_bytes(bytes[4..12].try_into().expect("8 bytes")),
+            late_frames: u32::from_le_bytes(bytes[12..16].try_into().expect("4 bytes")),
+            jitter_target_ms: u16::from_le_bytes(bytes[16..18].try_into().expect("2 bytes")),
+            buffered_ms: u16::from_le_bytes(bytes[18..20].try_into().expect("2 bytes")),
+            latency_est_ms: u16::from_le_bytes(bytes[20..22].try_into().expect("2 bytes")),
+        })
+    }
 }
 
 /// Build the 5-byte reply the sender reads after its handshake.
@@ -314,6 +369,25 @@ mod tests {
                 expected: 48,
                 got: 47
             })
+        ));
+    }
+
+    #[test]
+    fn status_packet_round_trip_and_layout() {
+        let s = StatusPacket {
+            lost_frames: 1 << 40,
+            late_frames: 7,
+            jitter_target_ms: 43,
+            buffered_ms: 51,
+            latency_est_ms: 96,
+        };
+        let b = s.encode();
+        assert_eq!(&b[0..2], b"PS");
+        assert_eq!(b[2], 1);
+        assert_eq!(StatusPacket::parse(&b), Ok(s));
+        assert!(matches!(
+            StatusPacket::parse(&b[..23]),
+            Err(DecodeError::TooShort { .. })
         ));
     }
 

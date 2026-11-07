@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use phonecast_wire::{
-    AUDIO_HEADER_SIZE, AudioHeader, Codec, HANDSHAKE_REPLY_SIZE, Handshake, Status, decode_reply,
+    AUDIO_HEADER_SIZE, AudioHeader, Codec, HANDSHAKE_REPLY_SIZE, Handshake, Status, StatusPacket,
+    decode_reply,
 };
 
 #[derive(Parser)]
@@ -175,6 +176,11 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
 
     let audio = UdpSocket::bind("0.0.0.0:0")?;
     audio.connect((host, cli.udp_port))?;
+    // The receiver streams 1 Hz status packets back to this socket. Poll it
+    // NON-blocking (Windows rejects a zero timeout, so set_nonblocking):
+    // blocking even ~1 ms per packet made this sender drift behind real
+    // time — proved by the first stats demo, where 6 s of audio took 19 s.
+    audio.set_nonblocking(true)?;
     println!(
         "streaming {} ({} Hz, {} ch, {total_seconds:.1} s) to {host} tcp {} / udp {} — Ctrl-C stops",
         file.display(),
@@ -194,10 +200,10 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
     };
     let mut packet_buf = vec![0u8; AUDIO_HEADER_SIZE + payload_capacity];
     let frame_duration = Duration::from_secs_f64(frame_size as f64 / spec.sample_rate as f64);
-    // Give the receiver a head start: 200 ms of audio goes out as a burst
-    // before real-time pacing begins. (Kept modest: an excess burst only
-    // buys latency, and the receiver discards old frames to catch up.)
-    let start = Instant::now() - Duration::from_millis(200);
+    // Paced from the first sample onward: the receiver's own prefill gate
+    // decides when to start playing. (An initial burst here just becomes
+    // jitter-buffer latency the receiver has to flush away.)
+    let start = Instant::now();
 
     let mut sample_slot = vec![0i16; samples_per_packet];
     let mut sequence: u32 = 0;
@@ -276,11 +282,40 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
             sequence = sequence.wrapping_add(1);
             sent_packets += 1;
             next_target += frame_duration;
+
+            // Drain any status replies that arrived since the last send.
+            let mut status_buf = [0u8; 64];
+            while let Ok(m) = audio.recv(&mut status_buf) {
+                if let Ok(st) = StatusPacket::parse(&status_buf[..m]) {
+                    println!(
+                        "   receiver: lost {} late {} | jitter {} ms | buffer {} ms | latency ≈ {} ms",
+                        st.lost_frames, st.late_frames, st.jitter_target_ms, st.buffered_ms,
+                        st.latency_est_ms,
+                    );
+                }
+            }
         }
     }
 
-    // Let the receiver drain the buffered tail before the lease closes.
-    std::thread::sleep(Duration::from_millis(700));
+    // Let the receiver drain the buffered tail — and keep printing its
+    // status replies during the wait — before the lease closes.
+    let drain_until = Instant::now() + Duration::from_millis(1200);
+    let mut status_buf = [0u8; 64];
+    while Instant::now() < drain_until {
+        match audio.recv(&mut status_buf) {
+            Ok(m) => {
+                if let Ok(st) = StatusPacket::parse(&status_buf[..m]) {
+                    println!(
+                        "   receiver: lost {} late {} | jitter {} ms | buffer {} ms | latency ≈ {} ms",
+                        st.lost_frames, st.late_frames, st.jitter_target_ms, st.buffered_ms,
+                        st.latency_est_ms,
+                    );
+                }
+            }
+            // Non-blocking socket: no packet ready.
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
     println!("sent {sent_packets} datagrams; closing the session lease.");
     // control drops here, closing TCP and ending the receiver session.
     Ok(())

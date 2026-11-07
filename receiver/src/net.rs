@@ -53,6 +53,17 @@ pub struct Session {
     decode: Option<Mutex<DecodeState>>,
     /// Cleared when the lease closes; threads wind down on it.
     pub running: AtomicBool,
+    /// Where to send status packets: UDP source of the latest audio.
+    last_peer: Mutex<Option<std::net::SocketAddr>>,
+    /// One-way-delay estimator inputs: `net_min_us` is the running minimum
+    /// of (arrival - capture), which absorbs the constant, unmeasurable
+    /// sender/receiver clock offset; `net_last_us` the most recent sample.
+    /// Their difference is the *queuing* part of network delay. The
+    /// constant part (LAN propagation ~1-3 ms) is in neither, so the
+    /// reported latency is a lower-bound estimate — no cross-machine clock
+    /// sync is claimed or needed.
+    net_min_us: std::sync::atomic::AtomicI64,
+    net_last_us: std::sync::atomic::AtomicI64,
 }
 
 pub struct Shared {
@@ -76,8 +87,13 @@ pub fn run(device: &cpal::Device, args: &ListenArgs) -> Result<()> {
     let udp_addr = SocketAddr::new(args.bind, args.udp_port);
     let tcp = TcpListener::bind(tcp_addr)
         .with_context(|| format!("failed to bind control port {tcp_addr} (already in use?)"))?;
-    let udp = UdpSocket::bind(udp_addr)
-        .with_context(|| format!("failed to bind audio port {udp_addr} (already in use?)"))?;
+    // Shared: the receive thread reads from it, playout threads reply to
+    // the active sender with status packets through it (send_to is &self,
+    // safe concurrently with recv_from).
+    let udp = Arc::new(
+        UdpSocket::bind(udp_addr)
+            .with_context(|| format!("failed to bind audio port {udp_addr} (already in use?)"))?,
+    );
 
     if args.token.is_empty() {
         tracing::warn!(
@@ -128,13 +144,14 @@ pub fn run(device: &cpal::Device, args: &ListenArgs) -> Result<()> {
 
     let udp_thread = {
         let shared = Arc::clone(&shared);
+        let udp = Arc::clone(&udp);
         std::thread::spawn(move || udp_loop(udp, shared))
     };
 
     for incoming in tcp.incoming() {
         match incoming {
             Ok(stream) => {
-                if let Err(err) = handle_session(device, stream, &shared, args) {
+                if let Err(err) = handle_session(device, stream, &shared, args, &udp) {
                     tracing::warn!(%err, "session ended with an error");
                     *lock(&shared.current) = None;
                 }
@@ -152,6 +169,7 @@ fn handle_session(
     mut stream: TcpStream,
     shared: &Shared,
     args: &ListenArgs,
+    udp: &Arc<UdpSocket>,
 ) -> Result<()> {
     let peer = stream
         .peer_addr()
@@ -238,6 +256,9 @@ fn handle_session(
         )),
         decode,
         running: AtomicBool::new(true),
+        last_peer: Mutex::new(None),
+        net_min_us: std::sync::atomic::AtomicI64::new(i64::MAX),
+        net_last_us: std::sync::atomic::AtomicI64::new(0),
     });
 
     let consumed = Arc::new(AtomicU64::new(0));
@@ -289,9 +310,12 @@ fn handle_session(
     let playout_thread = {
         let session = Arc::clone(&session);
         let consumed = Arc::clone(&consumed);
+        let udp = Arc::clone(udp);
         // Threads need 'static data, so plain values cross the boundary.
         let extra_delay_ms = args.extra_delay_ms;
-        std::thread::spawn(move || playout_loop(session, render_producer, consumed, extra_delay_ms))
+        std::thread::spawn(move || {
+            playout_loop(session, render_producer, consumed, extra_delay_ms, udp)
+        })
     };
 
     stream
@@ -348,6 +372,7 @@ fn playout_loop(
     mut producer: HeapProd<f32>,
     consumed: Arc<AtomicU64>,
     extra_delay_ms: f64,
+    udp: Arc<UdpSocket>,
 ) -> (u64, u64) {
     let mut pl = Playout::new(PlayoutConfig {
         sample_rate: session.sample_rate,
@@ -357,6 +382,7 @@ fn playout_loop(
     let tick = Duration::from_millis(10);
     let mut last = Instant::now();
     let mut last_stats = Instant::now();
+    let mut last_status = Instant::now();
     while session.running.load(Ordering::Relaxed) {
         let now = Instant::now();
         let dt = now.duration_since(last);
@@ -389,21 +415,62 @@ fn playout_loop(
             let buffered = jb.buffered_ms();
             let stats = jb.stats();
             drop(jb);
+            let consumed_now = consumed.load(Ordering::Relaxed);
+            let (produced_real, _consumed_at_log, ring_real) = pl.ring_diag(consumed_now);
             tracing::info!(
                 jitter_target_ms = format!("{target:.0}"),
                 buffered_ms = format!("{buffered:.0}"),
-                level_ms = format!(
-                    "{:.0}",
-                    pl.level_ms(consumed.load(Ordering::Relaxed), &lock(&session.jitter))
-                ),
+                level_ms = format!("{:.0}", pl.level_ms(consumed_now, &lock(&session.jitter))),
+                ring_real_ms = format!("{:.0}", ring_real as f64 * 1000.0 / session.sample_rate as f64),
+                produced_real,
+                consumed_at_log = _consumed_at_log,
+                consumed_now,
                 lost = stats.lost,
                 late = stats.late_dropped,
                 underrun_ticks = pl.underrun_ticks,
                 "playout stats"
             );
         }
+
+        // Status packet back to the sender ~1 Hz (docs/protocol.md
+        // "Status"). Best effort: a lost reply must never disturb audio.
+        if last_status.elapsed() >= Duration::from_secs(1) {
+            last_status = Instant::now();
+            let peer = lock(&session.last_peer);
+            let Some(peer) = *peer else { continue };
+            let jb = lock(&session.jitter);
+            let stats = jb.stats();
+            let target = jb.target_ms();
+            let buffered = jb.buffered_ms();
+            drop(jb);
+            let level = pl.level_ms(consumed.load(Ordering::Relaxed), &lock(&session.jitter));
+            // Queuing part of the network delay; see Session::net_min_us
+            // for why this is a lower bound.
+            let min_us = session.net_min_us.load(Ordering::Relaxed);
+            let last_us = session.net_last_us.load(Ordering::Relaxed);
+            let queue_us = if min_us == i64::MAX { 0 } else { last_us - min_us };
+            let latency_ms = level + queue_us.max(0) as f64 / 1_000.0;
+            let packet = phonecast_wire::StatusPacket {
+                lost_frames: stats.lost,
+                late_frames: stats.late_dropped.min(u32::MAX as u64) as u32,
+                jitter_target_ms: saturate_ms(target),
+                buffered_ms: saturate_ms(buffered),
+                latency_est_ms: saturate_ms(latency_ms),
+            };
+            let _ = udp.send_to(&packet.encode(), peer);
+        }
     }
     (pl.underrun_ticks, pl.produced_frames())
+}
+
+fn saturate_ms(ms: f64) -> u16 {
+    if ms.is_nan() || ms <= 0.0 {
+        0
+    } else if ms > u16::MAX as f64 {
+        u16::MAX
+    } else {
+        ms.round() as u16
+    }
 }
 
 fn reject(stream: &mut TcpStream, status: Status) -> Result<()> {
@@ -420,13 +487,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The UDP receive thread: parse datagrams and hand frames to the session's
 /// jitter buffer. All the realtime-sensitive work lives elsewhere.
-fn udp_loop(udp: UdpSocket, shared: Arc<Shared>) {
+fn udp_loop(udp: Arc<UdpSocket>, shared: Arc<Shared>) {
     // Headroom over the spec limit so oversized datagrams are *counted*
     // rather than silently truncated.
     let mut buf = vec![0u8; 4096];
     let t0 = Instant::now();
     loop {
-        let (n, _from) = match udp.recv_from(&mut buf) {
+        let (n, from) = match udp.recv_from(&mut buf) {
             Ok(x) => x,
             Err(err) => {
                 tracing::warn!("udp recv failed: {err}");
@@ -507,6 +574,15 @@ fn udp_loop(udp: UdpSocket, shared: Arc<Shared>) {
             session.sample_rate,
         );
         lock(&session.jitter).push(frame, arrival_ms);
+
+        // One-way-delay inputs + where status replies should go.
+        let d_us = (arrival_ms * 1_000.0) as i64 - header.capture_ts_us as i64;
+        session.net_min_us.fetch_min(d_us, Ordering::Relaxed);
+        session.net_last_us.store(d_us, Ordering::Relaxed);
+        let mut peer = lock(&session.last_peer);
+        if peer.as_ref() != Some(&from) {
+            *peer = Some(from);
+        }
     }
 }
 
