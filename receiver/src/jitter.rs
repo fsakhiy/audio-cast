@@ -180,6 +180,14 @@ impl JitterBuffer {
         self.estimator.target_ms()
     }
 
+    /// Playout starved (buffer ran dry): demand more headroom immediately.
+    /// Without this, bursty-but-lossless links never raise the target and
+    /// stutter forever (observed live: arrivals in 90 ms bursts, buffer
+    /// oscillating 5..95 ms, loss ~0).
+    pub fn report_underrun(&mut self) {
+        self.estimator.report_event();
+    }
+
     pub fn stats(&self) -> JitterStats {
         self.stats
     }
@@ -424,6 +432,41 @@ mod tests {
             est.report_event();
         }
         assert!(est.target_ms() <= 200.0);
+    }
+
+    #[test]
+    fn underruns_raise_target_and_calm_decays_it() {
+        let mut jb = JitterBuffer::new(1, 48_000, 30.0);
+        let base = jb.target_ms();
+        // Clean arrivals keep the target at base.
+        for i in 0..100u32 {
+            jb.push(frame(i, u64::from(i) * 5_000), f64::from(i) * 5.0);
+            jb.pop();
+        }
+        assert!(
+            jb.target_ms() < base + 5.0,
+            "quiet link crept: {}",
+            jb.target_ms()
+        );
+        // A starvation burst must push the target up sharply...
+        for _ in 0..10 {
+            jb.report_underrun();
+        }
+        let raised = jb.target_ms();
+        assert!(
+            raised > base + 30.0,
+            "underruns should raise target: {raised}"
+        );
+        // ...and a hundred calm arrivals must let it decay again.
+        for i in 100..200u32 {
+            jb.push(frame(i, u64::from(i) * 5_000), f64::from(i) * 5.0);
+            jb.pop();
+        }
+        assert!(
+            jb.target_ms() < raised,
+            "target should decay in calm: {}",
+            jb.target_ms()
+        );
     }
 
     #[test]

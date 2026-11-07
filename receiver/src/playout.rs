@@ -254,6 +254,12 @@ impl Playout {
             }
             if starved {
                 self.underrun_ticks += 1;
+                // Tell the estimator: this link needs more cushion. Bounded
+                // to the 10-200 ms band and decayed by calm seconds, so a
+                // one-off hiccup doesn't stick (observed live: bursty
+                // lossless link oscillating 5..95 ms stuttered forever
+                // because only loss events raised the target).
+                jitter.report_underrun();
                 // render() zero-pads whatever the buffer can't cover, which
                 // is silence, never a repeat of stale samples.
             }
