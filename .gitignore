@@ -9,5 +9,12 @@
 *.iml
 .idea/
 
+# Claude Code session state (durable reminders, lock files) — machine-local.
+# If shared Claude config is ever wanted, unignore it explicitly instead of
+# removing this block, e.g.:
+#   !/.claude/settings.json
+#   !/.claude/commands/
+/.claude/*
+
 # Misc
 *.log
