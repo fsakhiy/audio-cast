@@ -421,7 +421,10 @@ fn playout_loop(
                 jitter_target_ms = format!("{target:.0}"),
                 buffered_ms = format!("{buffered:.0}"),
                 level_ms = format!("{:.0}", pl.level_ms(consumed_now, &lock(&session.jitter))),
-                ring_real_ms = format!("{:.0}", ring_real as f64 * 1000.0 / session.sample_rate as f64),
+                ring_real_ms = format!(
+                    "{:.0}",
+                    ring_real as f64 * 1000.0 / session.sample_rate as f64
+                ),
                 produced_real,
                 consumed_at_log = _consumed_at_log,
                 consumed_now,
@@ -448,7 +451,11 @@ fn playout_loop(
             // for why this is a lower bound.
             let min_us = session.net_min_us.load(Ordering::Relaxed);
             let last_us = session.net_last_us.load(Ordering::Relaxed);
-            let queue_us = if min_us == i64::MAX { 0 } else { last_us - min_us };
+            let queue_us = if min_us == i64::MAX {
+                0
+            } else {
+                last_us - min_us
+            };
             let latency_ms = level + queue_us.max(0) as f64 / 1_000.0;
             let packet = phonecast_wire::StatusPacket {
                 lost_frames: stats.lost,

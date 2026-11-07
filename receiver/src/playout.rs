@@ -126,8 +126,7 @@ impl Playout {
     pub fn new(cfg: PlayoutConfig) -> Self {
         // channels pulled out before cfg moves into the struct.
         let channels = cfg.channels;
-        let seed_frames =
-            (RING_SEED_MS * cfg.sample_rate as f64 / 1_000.0).ceil() as usize;
+        let seed_frames = (RING_SEED_MS * cfg.sample_rate as f64 / 1_000.0).ceil() as usize;
         Self {
             cfg,
             drift: DriftController::new(crate::drift::DriftConfig::default()),
@@ -417,12 +416,22 @@ mod tests {
         }
         let out = p.tick(0.01, 0, &mut jitter);
         assert!(p.started, "level should pass the gate");
-        assert_eq!(out.len() / p.cfg.channels, p.seed_frames, "first push is exactly the ring seed");
-        assert!(out.iter().all(|&s| s == 0.0), "the seed is silence by design");
+        assert_eq!(
+            out.len() / p.cfg.channels,
+            p.seed_frames,
+            "first push is exactly the ring seed"
+        );
+        assert!(
+            out.iter().all(|&s| s == 0.0),
+            "the seed is silence by design"
+        );
         // Once the device has consumed the seed, pushes carry real audio.
         let out = p.tick(0.01, p.seed_frames as u64, &mut jitter);
         assert!(!out.is_empty());
-        assert!(out.iter().any(|&s| s != 0.0), "real audio flows after the seed");
+        assert!(
+            out.iter().any(|&s| s != 0.0),
+            "real audio flows after the seed"
+        );
     }
 
     /// Simulated feedback device: pops at most `per_tick` frames per tick
@@ -490,7 +499,11 @@ mod tests {
             "ring depth {} — producer ran away",
             dev.ring
         );
-        assert!(dev.ring > 256, "ring depth {} — device will starve", dev.ring);
+        assert!(
+            dev.ring > 256,
+            "ring depth {} — device will starve",
+            dev.ring
+        );
     }
 
     #[test]

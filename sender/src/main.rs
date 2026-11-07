@@ -289,7 +289,10 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
                 if let Ok(st) = StatusPacket::parse(&status_buf[..m]) {
                     println!(
                         "   receiver: lost {} late {} | jitter {} ms | buffer {} ms | latency ≈ {} ms",
-                        st.lost_frames, st.late_frames, st.jitter_target_ms, st.buffered_ms,
+                        st.lost_frames,
+                        st.late_frames,
+                        st.jitter_target_ms,
+                        st.buffered_ms,
                         st.latency_est_ms,
                     );
                 }
@@ -307,7 +310,10 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
                 if let Ok(st) = StatusPacket::parse(&status_buf[..m]) {
                     println!(
                         "   receiver: lost {} late {} | jitter {} ms | buffer {} ms | latency ≈ {} ms",
-                        st.lost_frames, st.late_frames, st.jitter_target_ms, st.buffered_ms,
+                        st.lost_frames,
+                        st.late_frames,
+                        st.jitter_target_ms,
+                        st.buffered_ms,
                         st.latency_est_ms,
                     );
                 }
