@@ -73,6 +73,31 @@ class WireTest {
     }
 
     @Test
+    fun statusParsesSpecLayout() {
+        // Hand-built from docs/protocol.md's status byte table — the same
+        // vectors the Rust test uses, so the two languages must agree.
+        val b = ByteArray(24)
+        "PS".toByteArray().copyInto(b, 0)
+        b[2] = 1
+        b[3] = 0
+        byteArrayOf(0, 0, 0, 0, 0, 1, 0, 0).copyInto(b, 4) // lost = 1<<40
+        byteArrayOf(7, 0, 0, 0).copyInto(b, 12) // late = 7
+        byteArrayOf(43, 0).copyInto(b, 16) // jitter target 43
+        byteArrayOf(51, 0).copyInto(b, 18) // buffered 51
+        byteArrayOf(0x60, 0).copyInto(b, 20) // latency 96 = 0x0060 LE
+
+        val st = Wire.parseStatus(b, 24)!!
+        assert(st.lostFrames == 1L shl 40)
+        assert(st.lateFrames == 7L)
+        assert(st.jitterTargetMs == 43)
+        assert(st.bufferedMs == 51)
+        assert(st.latencyEstMs == 96)
+        // Foreign traffic is ignored, not crashed on.
+        assert(Wire.parseStatus("HELLO!".toByteArray() + ByteArray(18), 24) == null)
+        assert(Wire.parseStatus(b, 23) == null)
+    }
+
+    @Test
     fun fullWireFrameStaysUnderMtuCap() {
         val perHalf = Wire.HEADER_BYTES + 240 * 2 * 2
         assert(perHalf <= Wire.MAX_DATAGRAM_BYTES)

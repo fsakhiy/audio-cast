@@ -14,6 +14,7 @@ object Wire {
     const val REPLY_BYTES = 5
     const val HEADER_BYTES = 18
     const val MAX_DATAGRAM_BYTES = 1200
+    const val STATUS_SIZE = 24
 
     const val CODEC_PCM_S16LE: Byte = 0
 
@@ -67,6 +68,30 @@ object Wire {
         val magic = String(bytes, 0, 4, Charsets.US_ASCII)
         require(magic == "PCA1") { "bad reply magic: $magic" }
         return bytes[4]
+    }
+
+    data class ReceiverStats(
+        val lostFrames: Long,
+        val lateFrames: Long,
+        val jitterTargetMs: Int,
+        val bufferedMs: Int,
+        val latencyEstMs: Int,
+    )
+
+    /** Parse a receiver status packet (docs/protocol.md "Status"); null on
+     *  anything that isn't one — senders MUST ignore unknown UDP traffic. */
+    fun parseStatus(bytes: ByteArray, len: Int): ReceiverStats? {
+        if (len < STATUS_SIZE) return null
+        if (bytes[0] != 'P'.code.toByte() || bytes[1] != 'S'.code.toByte()) return null
+        if (bytes[2] != PROTOCOL_VERSION) return null
+        val buf = ByteBuffer.wrap(bytes, 0, STATUS_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+        buf.position(4)
+        val lost = buf.getLong()
+        val late = buf.getInt().toLong() and 0xFFFF_FFFFL
+        val target = buf.getShort().toInt() and 0xFFFF
+        val buffered = buf.getShort().toInt() and 0xFFFF
+        val latency = buf.getShort().toInt() and 0xFFFF
+        return ReceiverStats(lost, late, target, buffered, latency)
     }
 
     /**

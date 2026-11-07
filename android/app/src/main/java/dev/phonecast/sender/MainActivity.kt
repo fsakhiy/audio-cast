@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
         discovery = ReceiverDiscovery(applicationContext).also { it.start() }
         saved = SavedSettings(this)
         settings = SenderSettings(saved.host, saved.tcpPort, saved.udpPort, saved.token)
+        diedBeforeLaunch = saved.streamWasActive
         setContent {
             MaterialTheme { PhoneCastScreen(applicationContext) }
         }
@@ -104,6 +105,19 @@ class MainActivity : ComponentActivity() {
     // SharedPreferences (milestone 5).
     internal lateinit var settings: SenderSettings
 
+    /** True when the previous process life ended with a stream supposed to
+     *  be running — the OEM killer's fingerprint (milestone 6). */
+    internal var diedBeforeLaunch = false
+        private set
+
+    internal fun markGuideSeen() {
+        saved.guideSeen = true
+    }
+
+    internal fun acknowledgeDeath() {
+        saved.streamWasActive = false
+    }
+
     companion object {
         fun stop(context: Context) {
             ContextCompat.startForegroundService(
@@ -137,8 +151,17 @@ fun PhoneCastScreen(context: Context) {
     val ui by StreamState.ui.collectAsStateWithLifecycle()
 
     var error by rememberSaveable { mutableStateOf<String?>(null) }
+    var showGuide by rememberSaveable { mutableStateOf(activity.diedBeforeLaunch) }
 
     Scaffold { padding ->
+        if (showGuide) {
+            VivoGuide(onBack = {
+                showGuide = false
+                activity.markGuideSeen()
+                activity.acknowledgeDeath()
+            })
+            return@Scaffold
+        }
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -149,6 +172,18 @@ fun PhoneCastScreen(context: Context) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("PhoneCast sender", style = MaterialTheme.typography.headlineSmall)
+
+            if (activity.diedBeforeLaunch && !ui.running) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            "⚠ The previous stream was still running when the app died — " +
+                                "likely the system background-killer (common on vivo/iQOO).",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
 
             OutlinedTextField(
                 value = state.host,
@@ -241,6 +276,17 @@ fun PhoneCastScreen(context: Context) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(ui.statusLine)
                     Text("Datagrams sent: ${ui.packetsSent}   Bytes: ${ui.bytesSent / 1024} KiB")
+                    ui.receiverStats?.let { st ->
+                        Text(
+                            "Receiver: lost ${st.lostFrames} late ${st.lateFrames} · " +
+                                "latency ≈ ${st.latencyEstMs} ms · " +
+                                "buffer ${st.bufferedMs}/${st.jitterTargetMs} ms",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (ui.reconnects > 0) {
+                        Text("Reconnects this capture session: ${ui.reconnects}")
+                    }
                     if (ui.captureQuiet) {
                         Text(
                             "No audio captured for 3+ s. The playing app may block " +
@@ -250,6 +296,10 @@ fun PhoneCastScreen(context: Context) {
                         )
                     }
                 }
+            }
+
+            OutlinedButton(onClick = { showGuide = true }) {
+                Text("Background-kill protection guide (vivo/iQOO)")
             }
 
             Text(

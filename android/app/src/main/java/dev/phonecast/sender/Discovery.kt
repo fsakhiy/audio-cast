@@ -110,4 +110,20 @@ class SavedSettings(context: Context) {
     var token: String
         get() = prefs.getString("token", "") ?: ""
         set(v) = prefs.edit().putString("token", v).apply()
+
+    /** Set while a stream is supposed to be alive; if the process dies
+     *  (OEM task killer), the flag survives and the next launch notices. */
+    var streamWasActive: Boolean
+        get() = prefs.getBoolean("was_active", false)
+        set(v) = prefs.edit().putBoolean("was_active", v).apply()
+
+    var guideSeen: Boolean
+        get() = prefs.getBoolean("guide_seen", false)
+        set(v) = prefs.edit().putBoolean("guide_seen", v).apply()
+
+    companion object {
+        /** Same file from any component (service writes the death flag). */
+        fun file(context: Context) =
+            context.getSharedPreferences("phonecast", Context.MODE_PRIVATE)
+    }
 }
