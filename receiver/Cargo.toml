@@ -1,0 +1,17 @@
+[package]
+name = "phonecast-receiver"
+version = "0.1.0"
+edition = "2024"
+description = "PhoneCast PC receiver: plays streamed audio to the default output device"
+
+[dependencies]
+# cpal: cross-platform audio I/O (WASAPI shared mode on Windows, ALSA/PulseAudio on Linux).
+# clap: CLI arg parsing, with derive macros for a declarative flags struct.
+# anyhow: error handling in the binary (context chains); thiserror would only be needed
+#   for a published library crate, which this is not yet.
+# tracing + tracing-subscriber: structured logging, per project requirements.
+cpal = "0.15"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

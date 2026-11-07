@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target
+
+# Android / Gradle (added in milestone 3)
+/android/.gradle/
+/android/build/
+/android/**/build/
+/android/local.properties
+*.iml
+.idea/
+
+# Misc
+*.log
