@@ -71,15 +71,16 @@ impl Effective {
         if !(10.0..=200.0).contains(&jitter) {
             anyhow::bail!("jitter target must be between 10 and 200 ms (got {jitter})");
         }
-        let extra = cli
-            .extra_delay_ms
-            .or(file.extra_delay_ms)
-            .unwrap_or(0.0);
+        let extra = cli.extra_delay_ms.or(file.extra_delay_ms).unwrap_or(0.0);
         if !(0.0..=2000.0).contains(&extra) {
             anyhow::bail!("extra delay must be between 0 and 2000 ms (got {extra})");
         }
         Ok(Self {
-            token: cli.token.clone().or_else(|| file.token.clone()).unwrap_or_default(),
+            token: cli
+                .token
+                .clone()
+                .or_else(|| file.token.clone())
+                .unwrap_or_default(),
             bind,
             tcp_port: cli.tcp_port.or(file.tcp_port).unwrap_or(53_000),
             udp_port: cli.udp_port.or(file.udp_port).unwrap_or(53_001),

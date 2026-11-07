@@ -5,16 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
 /// Default config file location, or None on unsupported OSes (then only
 /// --config works).
 pub fn default_config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::var_os("APPDATA").map(|appdata| {
-            PathBuf::from(appdata).join("PhoneCast").join("config.toml")
-        })
+        std::env::var_os("APPDATA")
+            .map(|appdata| PathBuf::from(appdata).join("PhoneCast").join("config.toml"))
     }
     #[cfg(target_os = "linux")]
     {
@@ -33,11 +32,7 @@ pub fn default_config_path() -> Option<PathBuf> {
 /// autostart entry. Pure builder so the shape is testable; `run` executes.
 #[cfg(windows)]
 pub(crate) fn autostart_reg_command(exe: &Path, args: &[String]) -> Vec<String> {
-    let value = format!(
-        "\"{}\" {}",
-        exe.display(),
-        args.join(" ")
-    );
+    let value = format!("\"{}\" {}", exe.display(), args.join(" "));
     vec![
         "reg".into(),
         "add".into(),
@@ -89,7 +84,11 @@ pub(crate) fn systemd_user_unit_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"));
-    Some(base.join("systemd").join("user").join("phonecast-receiver.service"))
+    Some(
+        base.join("systemd")
+            .join("user")
+            .join("phonecast-receiver.service"),
+    )
 }
 
 /// Install login autostart for the receiver. On both OSes the strategy is
@@ -130,7 +129,9 @@ pub fn install_autostart() -> Result<String> {
     #[cfg(not(windows))]
     {
         if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-            bail!("no user D-Bus session found; systemd user services need a login session (or install packaging/phonecast-receiver.service manually)");
+            bail!(
+                "no user D-Bus session found; systemd user services need a login session (or install packaging/phonecast-receiver.service manually)"
+            );
         }
         let path = systemd_user_unit_path().context("HOME not set")?;
         std::fs::create_dir_all(path.parent().unwrap())
@@ -138,7 +139,10 @@ pub fn install_autostart() -> Result<String> {
         std::fs::write(&path, systemd_user_unit(&exe, &args))
             .with_context(|| format!("failed to write {}", path.display()))?;
         run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", "phonecast-receiver.service"])?;
+        run(
+            "systemctl",
+            &["--user", "enable", "--now", "phonecast-receiver.service"],
+        )?;
         Ok(format!(
             "systemd user service enabled and started.\nUnit: {}\nConfig: {}\nLogs: journalctl --user -u phonecast-receiver\nRemove with: phonecast-receiver --remove-autostart",
             path.display(),
@@ -215,14 +219,20 @@ mod tests {
     fn reg_command_quoting_and_shape() {
         let cmd = autostart_reg_command(
             Path::new(r"C:\Program Files\PhoneCast\phonecast-receiver.exe"),
-            &["--config".into(), r"C:\Users\u\AppData\Roaming\PhoneCast\config.toml".into()],
+            &[
+                "--config".into(),
+                r"C:\Users\u\AppData\Roaming\PhoneCast\config.toml".into(),
+            ],
         );
         assert_eq!(cmd[0], "reg");
         assert_eq!(cmd[1], "add");
         assert!(cmd.iter().any(|a| a.ends_with(r"\Run")));
         assert!(cmd.iter().any(|a| a == "PhoneCast"));
         let value = &cmd[cmd.len() - 2];
-        assert!(value.starts_with(r#""C:\Program Files"#), "exe path must be quoted: {value}");
+        assert!(
+            value.starts_with(r#""C:\Program Files"#),
+            "exe path must be quoted: {value}"
+        );
         assert!(value.contains("--config"));
     }
 
@@ -243,7 +253,10 @@ mod tests {
     fn unit_contents_have_execstart_and_restart() {
         let unit = systemd_user_unit(
             Path::new("/home/u/.cargo/bin/phonecast-receiver"),
-            &["--config".into(), "/home/u/.config/phonecast/config.toml".into()],
+            &[
+                "--config".into(),
+                "/home/u/.config/phonecast/config.toml".into(),
+            ],
         );
         assert!(unit.contains("ExecStart=/home/u/.cargo/bin/phonecast-receiver --config /home/u/.config/phonecast/config.toml"));
         assert!(unit.contains("Restart=on-failure"));

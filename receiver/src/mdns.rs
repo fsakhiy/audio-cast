@@ -30,7 +30,11 @@ pub fn advertise(
         props.insert("udp".to_string(), udp_port.to_string());
         props.insert(
             "auth".to_string(),
-            if token_set { "1".to_string() } else { "0".to_string() },
+            if token_set {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            },
         );
         let info = ServiceInfo::new(
             SERVICE_TYPE,

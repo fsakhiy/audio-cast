@@ -104,7 +104,8 @@ pub fn run(device: &cpal::Device, args: &ListenArgs) -> Result<()> {
             }
             None
         } else {
-            match crate::mdns::advertise(&ips, args.tcp_port, args.udp_port, !args.token.is_empty()) {
+            match crate::mdns::advertise(&ips, args.tcp_port, args.udp_port, !args.token.is_empty())
+            {
                 Ok((daemon, names)) => {
                     tracing::info!(services = %names.join(", "), "advertising _phonecast._tcp.local via mDNS");
                     Some(daemon)
