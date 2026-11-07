@@ -23,7 +23,9 @@ android {
         // CI provides the keystore as a base64 env var (GitHub Actions
         // secret). When absent (local dev), release builds fall back to the
         // debug key below so `assembleRelease` still works.
-        val ksB64 = System.getenv("PHONECAST_KEYSTORE_B64")
+        // trim(): tolerate a trailing newline from clipboard/secret paste;
+        // the strict Base64 decoder rejects one.
+        val ksB64 = System.getenv("PHONECAST_KEYSTORE_B64")?.trim()
         if (!ksB64.isNullOrBlank()) {
             create("phonecast") {
                 val ksFile = layout.buildDirectory.file("phonecast-release.keystore")
