@@ -27,6 +27,11 @@ No virtual audio drivers, no A2DP link between phone and PC.
 
 ## Quickstart (Windows)
 
+**No build needed:** grab the three binaries from [Releases](../../releases) —
+`phonecast-receiver-windows-x64.exe` (double-click; if SmartScreen objects:
+*More info → Run anyway*), `phonecast-app-release.apk` (sideload), done.
+The build-from-source route follows.
+
 Prereqs: Rust toolchain; CMake on PATH (the `opus` crate compiles libopus
 through it).
 
@@ -82,17 +87,18 @@ both `wav-sender` and the phone UI.
 
 ## Current status
 
-- Milestones 1–5: done (see `git log`), including adaptive buffering and
+- Milestones 1–6: done (see `git log`), including adaptive buffering and
   Opus end-to-end **between Rust components**.
-- Milestone 6: stats overlay, reconnect, vivo guide, README — implemented
-  and compile-verified.
-- **Open items:** the on-device phone test has never been run (procedure:
-  `docs/android-test.md`); Linux build confirmation needs a Linux machine
-  (`docs/linux-verify.md`); absolute end-to-end latency numbers come from
-  the device test (the receiver reports the buffered pipeline portion
-  today — an honest lower bound, not yet a click-track measurement);
-  phone-side Opus encode would need NDK libopus (Android has no Opus
-  encoder in MediaCodec).
+- **Verified on a real device** (iQOO, Android 16): phone → PC streaming over
+  Wi-Fi with adaptive buffering works; this test found & fixed the Android
+  15+ `RECORD_AUDIO` requirement for playback capture. Procedure stays in
+  `docs/android-test.md` for future changes.
+- **GitHub Releases:** push a `v*` tag → CI builds the Windows receiver, the
+  Linux receiver (first compile confirmed in real CI), and a release-signed
+  Android APK — see `.github/workflows/release.yml`.
+- **Open items:** absolute end-to-end latency numbers (click-track test; the
+  receiver reports a buffered-pipeline lower bound today); phone-side Opus
+  encode would need NDK libopus (Android has no Opus encoder in MediaCodec).
 - Out of scope by design: phone mic input, PC→phone audio, video sync,
   multi-phone, anything internet-facing, virtual audio drivers.
 

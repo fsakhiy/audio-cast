@@ -79,9 +79,12 @@ transport stays the LAN, and the user's headphones stay attached to the PC.
   per-second click bursts designed for this; receiver-side numbers are
   buffered-pipeline estimates only. Needs phone-in-hand session (~2 min with
   a stopwatch or a second phone recording).
-- **Linux build confirmation** — never compiled on Linux (no WSL/Docker on
-  the dev machine). `docs/linux-verify.md` has the exact steps; `alsa-sys`
-  and the `opus` crate's CMake build both need checking there.
+- ~~**Linux build confirmation**~~ — ✅ DONE via CI: the v0.1.0 release run
+  compiles `phonecast-receiver` on ubuntu-latest (alsa-sys + libopus/CMake
+  both fine). `docs/linux-verify.md` remains for audible on-desktop checks.
+- ~~**Release keystore**~~ — ✅ DONE: CI signs `app-release.apk` from GitHub
+  secrets (keystore lives in `~/tools/phonecast-release`, OUTSIDE git —
+  back it up; losing it means users must uninstall+reinstall to upgrade).
 - **`--install-autostart` was never executed** (registry/systemd writes are
   user decisions). Command builders are unit-tested; first real use will
   confirm vivo-era Windows behavior. Also consider deleting the extra
