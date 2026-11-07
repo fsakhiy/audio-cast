@@ -1,0 +1,17 @@
+[package]
+name = "wav-sender"
+version = "0.1.0"
+edition = "2024"
+description = "PhoneCast test sender: streams a WAV file to the receiver over UDP, like milestone 3's Android app will"
+
+[[bin]]
+name = "wav-sender"
+path = "src/main.rs"
+
+[dependencies]
+phonecast-wire = { path = "../wire" }
+# hound: small, mature WAV reader/writer. Alternative was hand-parsing RIFF
+# chunks, which is ~150 lines of error-prone code for a test tool.
+hound = "3.5"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
