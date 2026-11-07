@@ -1,3 +1,5 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -17,10 +19,29 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        // CI provides the keystore as a base64 env var (GitHub Actions
+        // secret). When absent (local dev), release builds fall back to the
+        // debug key below so `assembleRelease` still works.
+        val ksB64 = System.getenv("PHONECAST_KEYSTORE_B64")
+        if (!ksB64.isNullOrBlank()) {
+            create("phonecast") {
+                val ksFile = layout.buildDirectory.file("phonecast-release.keystore")
+                    .get().asFile
+                ksFile.writeBytes(Base64.getDecoder().decode(ksB64))
+                storeFile = ksFile
+                storePassword = System.getenv("PHONECAST_KEYSTORE_PASSWORD")
+                keyAlias = "phonecast"
+                keyPassword = System.getenv("PHONECAST_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // Debug signing for now; a real keystore is milestone 6 polish.
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("phonecast")
+                ?: signingConfigs.getByName("debug")
         }
     }
 

@@ -4,12 +4,13 @@
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # Outputs attached to the release:
-#   phonecast-receiver-windows-x64.exe   (MSVC, static-ish, opus built in)
+#   phonecast-receiver-windows-x64.exe   (MSVC, opus built in; unsigned,
+#                                         SmartScreen "run anyway")
 #   phonecast-receiver-linux-x64         (ALSA via cpal; also confirms the
 #                                         Linux build — milestone-1 item)
-#   phonecast-app-debug.apk              (debug-signed: installs with the
-#                                         usual "unknown source" warning; a
-#                                         release keystore is TODO)
+#   phonecast-app-release.apk            (signed with the release keystore,
+#                                         which lives in GitHub secrets, not
+#                                         in git — see keystore note below)
 
 name: Release
 
@@ -54,23 +55,29 @@ jobs:
 
   app:
     runs-on: ubuntu-latest
+    # No setup-android step: GitHub's ubuntu runners ship a licensed Android
+    # SDK (ANDROID_HOME set, platform-tools/build-tools present) and AGP
+    # auto-downloads the rest. The action failed on the removed legacy
+    # `tools` package anyway.
+    env:
+      PHONECAST_KEYSTORE_B64: ${{ secrets.PHONECAST_KEYSTORE_B64 }}
+      PHONECAST_KEYSTORE_PASSWORD: ${{ secrets.PHONECAST_KEYSTORE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build debug APK
+      - name: Build release APK (signed when keystore secrets exist)
         run: |
           cd android
-          ./gradlew assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../phonecast-app-debug.apk
+          ./gradlew assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk ../phonecast-app-release.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: phonecast-app-debug.apk
-          path: phonecast-app-debug.apk
+          name: phonecast-app-release.apk
+          path: phonecast-app-release.apk
 
   release:
     needs: [receiver, app]
@@ -87,18 +94,20 @@ jobs:
           body: |
             ## Windows receiver
             `phonecast-receiver-windows-x64.exe` — save it, double-click, done.
-            First phone→PC connection: allow Windows Firewall's prompt (private
-            networks), or run the two `netsh` commands printed at startup.
+            First launch: Windows SmartScreen may say "protected your PC"
+            (unsigned, sorry) → **More info → Run anyway**. Then allow the
+            Firewall prompt for private networks, or run the two `netsh`
+            commands it prints at startup.
 
             ## Linux receiver
             `phonecast-receiver-linux-x64` — needs ALSA/PulseAudio present
-            (any desktop will have it).
+            (any desktop will have it). `chmod +x` and run.
 
             ## Android sender
-            `phonecast-app-debug.apk` — debug-signed, so Android will warn
-            before installing ("unknown app"); that's expected for GitHub
-            side-distribution. Requires Android 10+; on Android 15+ it asks
-            for the microphone permission — that gates playback *capture*
-            there, the mic itself is never sampled.
+            `phonecast-app-release.apk` — release-signed. Android will still
+            show its standard "installed via unknown sources?" sideload notice;
+            that is normal for GitHub distribution. Requires Android 10+; on
+            Android 15+ it asks for the microphone permission — that gates
+            playback *capture* there; the mic itself is never sampled.
 
             Sources + docs (protocol, setup, troubleshooting): this repo.
