@@ -1,8 +1,8 @@
-//! PhoneCast PC receiver — milestone 1.
+//! PhoneCast PC receiver.
 //!
-//! Current behavior: play a generated sine test tone to a chosen output
-//! device via cpal. Later milestones replace the tone with audio received
-//! over the network.
+//! Default mode: listen for a PhoneCast sender (TCP control + UDP audio, see
+//! docs/protocol.md) and play what arrives to the output device. `--tone`
+//! keeps the milestone-1 behavior: play a locally generated sine wave.
 
 use std::time::Duration;
 
@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+mod net;
 mod tone;
 use tone::Tone;
 
@@ -17,7 +18,7 @@ use tone::Tone;
 #[command(
     name = "phonecast-receiver",
     version,
-    about = "PhoneCast PC receiver (milestone 1: sine test tone on an output device)"
+    about = "PhoneCast PC receiver: plays audio streamed from the phone to an output device"
 )]
 struct Cli {
     /// Print all output devices and exit.
@@ -29,20 +30,44 @@ struct Cli {
     #[arg(short, long, value_name = "NAME")]
     device: Option<String>,
 
-    /// Test tone frequency in Hz. Must stay below half the sample rate.
+    /// Run the milestone-1 test tone instead of listening for a sender.
+    #[arg(long)]
+    tone: bool,
+
+    /// Address to bind the control (TCP) and audio (UDP) ports to.
+    /// Keep it LAN-only; never expose these ports to the internet.
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: std::net::IpAddr,
+
+    /// TCP control port (handshake + session lease).
+    #[arg(long, default_value_t = 53000)]
+    tcp_port: u16,
+
+    /// UDP audio port.
+    #[arg(long, default_value_t = 53001)]
+    udp_port: u16,
+
+    /// Pairing token that senders must present in the handshake.
+    /// Empty (default) accepts any sender — LAN trust only; enforcement with
+    /// a config file arrives in milestone 5.
+    #[arg(long, default_value = "")]
+    token: String,
+
+    /// Test tone frequency in Hz (tone mode). Must stay below half the sample rate.
     #[arg(long, default_value_t = 440.0)]
     freq: f64,
 
-    /// Peak volume from 0.0 to 1.0. Kept well below full scale by default to
-    /// protect your ears and headphones.
+    /// Peak volume from 0.0 to 1.0 (tone mode). Kept well below full scale by
+    /// default to protect your ears and headphones.
     #[arg(long, default_value_t = 0.3)]
     volume: f64,
 
-    /// Seconds to play; 0 plays until you press Ctrl-C.
+    /// Seconds to play (tone mode); 0 plays until you press Ctrl-C.
     #[arg(long, default_value_t = 5.0)]
     duration: f64,
 
-    /// Requested output sample rate in Hz. Default: the device's native rate.
+    /// Requested output sample rate in Hz (tone mode). Default: the device's
+    /// native rate. In listen mode the rate comes from the handshake.
     #[arg(long)]
     rate: Option<u32>,
 }
@@ -59,10 +84,6 @@ fn run() -> Result<()> {
     init_logging();
     let cli = Cli::parse();
 
-    if !(0.0 < cli.volume && cli.volume <= 1.0) {
-        bail!("--volume must be greater than 0 and at most 1");
-    }
-
     let host = cpal::default_host();
 
     if cli.list {
@@ -70,6 +91,26 @@ fn run() -> Result<()> {
     }
 
     let device = pick_device(&host, cli.device.as_deref())?;
+    if cli.tone {
+        run_tone(&cli, &device)
+    } else {
+        net::run(
+            &device,
+            &net::ListenArgs {
+                bind: cli.bind,
+                tcp_port: cli.tcp_port,
+                udp_port: cli.udp_port,
+                token: cli.token.clone(),
+            },
+        )
+    }
+}
+
+fn run_tone(cli: &Cli, device: &cpal::Device) -> Result<()> {
+    if !(0.0 < cli.volume && cli.volume <= 1.0) {
+        bail!("--volume must be greater than 0 and at most 1");
+    }
+
     let device_name = device
         .name()
         .unwrap_or_else(|_| "<unknown device>".to_owned());
@@ -111,9 +152,9 @@ fn run() -> Result<()> {
 
     let tone = Tone::new(cli.freq, sample_rate.0, cli.volume);
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => open_tone_stream::<f32>(&device, &config, tone),
-        cpal::SampleFormat::I16 => open_tone_stream::<i16>(&device, &config, tone),
-        cpal::SampleFormat::I32 => open_tone_stream::<i32>(&device, &config, tone),
+        cpal::SampleFormat::F32 => open_tone_stream::<f32>(device, &config, tone),
+        cpal::SampleFormat::I16 => open_tone_stream::<i16>(device, &config, tone),
+        cpal::SampleFormat::I32 => open_tone_stream::<i32>(device, &config, tone),
         format => bail!("unsupported output sample format: {format:?}"),
     }?;
 

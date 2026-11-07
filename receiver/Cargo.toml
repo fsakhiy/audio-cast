@@ -5,6 +5,12 @@ edition = "2024"
 description = "PhoneCast PC receiver: plays streamed audio to the default output device"
 
 [dependencies]
+phonecast-wire = { path = "../wire" }
+# ringbuf: lock-free single-producer/single-consumer queue between the UDP
+# receive thread and cpal's audio callback. Alternatives: rtrb (ringbuf is its
+# maintained fork), or a Mutex<VecDeque> — ruled out because locking in the
+# audio callback violates the project's realtime rules.
+ringbuf = "0.4"
 # cpal: cross-platform audio I/O (WASAPI shared mode on Windows, ALSA/PulseAudio on Linux).
 # clap: CLI arg parsing, with derive macros for a declarative flags struct.
 # anyhow: error handling in the binary (context chains); thiserror would only be needed
