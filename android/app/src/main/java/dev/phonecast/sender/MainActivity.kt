@@ -51,12 +51,28 @@ class MainActivity : ComponentActivity() {
             if (result.resultCode == RESULT_OK && result.data != null) {
                 startStreaming(result.resultCode, result.data!!)
             } else {
+                // Consent cancelled: release the holding foreground service.
+                MainActivity.stop(this)
                 StreamState.ui.update { it.copy(statusLine = "Cancelled — screen-capture consent is required") }
             }
         }
 
     private val notificationsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* denial is non-fatal */ }
+
+    // Android 15+ requires RECORD_AUDIO for AudioPlaybackCapture (playback
+    // only — we never touch the microphone). Without it every AudioRecord
+    // read fails with NO_INIT; verified on Android 16.
+    private val captureAudioPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                requestConsent()
+            } else {
+                StreamState.ui.update {
+                    it.copy(statusLine = "Playback capture needs the audio permission (Android 15+) — denied")
+                }
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,7 +86,10 @@ class MainActivity : ComponentActivity() {
         settings = SenderSettings(saved.host, saved.tcpPort, saved.udpPort, saved.token)
         diedBeforeLaunch = saved.streamWasActive
         setContent {
-            MaterialTheme { PhoneCastScreen(applicationContext) }
+            // Must be the Activity, not applicationContext: PhoneCastScreen
+            // casts its Context to MainActivity. Found by the first real
+            // device launch — no host-side test could have caught this.
+            MaterialTheme { PhoneCastScreen(this@MainActivity) }
         }
     }
 
@@ -125,10 +144,29 @@ class MainActivity : ComponentActivity() {
                 Intent(context, StreamService::class.java).apply { action = StreamService.ACTION_STOP },
             )
         }
+    }
 
-        fun requestConsent(activity: MainActivity) {
-            activity.consentLauncher.launch(activity.projectionManager.createScreenCaptureIntent())
+    /** Start button pipeline: RECORD_AUDIO (Android 15+ requirement for
+     *  playback capture) → per-session consent dialog → service. */
+    internal fun beginStartFlow() {
+        val granted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.RECORD_AUDIO,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            captureAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            requestConsent()
         }
+    }
+
+    private fun requestConsent() {
+        // FGS first (type mediaProjection), consent second — see
+        // StreamService.enterHoldingForeground: keeps the process alive
+        // while SystemUI's consent dialog is on top on aggressive OEMs.
+        startService(
+            Intent(this, StreamService::class.java).apply { action = StreamService.ACTION_PREPARE },
+        )
+        consentLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
 }
 
@@ -261,7 +299,7 @@ fun PhoneCastScreen(context: Context) {
                     enabled = !ui.running,
                     onClick = {
                         error = validate(state)
-                        if (error == null) MainActivity.requestConsent(activity)
+                        if (error == null) activity.beginStartFlow()
                     },
                 ) { Text("Start") }
                 OutlinedButton(

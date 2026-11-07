@@ -12,6 +12,11 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Lets the vivo guide request a battery-optimization exemption. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- REQUIRED since Android 15 for AudioPlaybackCapture itself (verified
+         on Android 16 / iQOO: without it every read returns NO_INIT -38).
+         We never capture from the microphone; it is the playback-capture
+         permission gate, alongside the per-session MediaProjection consent. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="false"

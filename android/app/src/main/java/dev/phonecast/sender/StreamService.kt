@@ -73,6 +73,7 @@ class StreamService : Service() {
         private const val NOTIFICATION_ID = 1
 
         const val ACTION_START = "dev.phonecast.sender.START"
+        const val ACTION_PREPARE = "dev.phonecast.sender.PREPARE"
         const val ACTION_STOP = "dev.phonecast.sender.STOP"
         const val EXTRA_HOST = "host"
         const val EXTRA_TCP_PORT = "tcp_port"
@@ -100,10 +101,28 @@ class StreamService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_PREPARE -> enterHoldingForeground()
             ACTION_START -> start(intent)
             ACTION_STOP -> stopStreaming("stopped by user")
         }
         return START_NOT_STICKY // a dead stream must not silently restart with a stale token
+    }
+
+    /**
+     * Entered foreground (type mediaProjection) WITHOUT creating a
+     * projection yet. Started before the consent dialog: OEM aggressive
+     * process management can freeze/kill a plain UI process while it waits
+     * on that dialog, which silently kills the projection result (the
+     * consent never lands, and the later AudioRecord then fails with
+     * INVALID_OPERATION). A foreground service survives that.
+     */
+    private fun enterHoldingForeground() {
+        if (running.get()) return // a session is already in progress
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification("Waiting for screen-capture consent…"),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+        )
     }
 
     private fun start(intent: Intent) {
@@ -188,6 +207,10 @@ class StreamService : Service() {
         if (ar.state != AudioRecord.STATE_INITIALIZED) {
             error("AudioRecord failed to initialize (is another capture in progress?)")
         }
+        ar.startRecording()
+        if (ar.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            error("AudioRecord did not enter RECORDING state (${ar.recordingState})")
+        }
         // Single timebase for capture timestamps, fixed for the whole
         // capture session and continuous across network reconnects.
         sessionBaseNanos = System.nanoTime()
@@ -205,6 +228,7 @@ class StreamService : Service() {
                 true
             } catch (e: java.io.IOException) {
                 if (!running.get()) break
+                Log.w(TAG, "network session failed", e)
                 false
             }
             reconnects++
@@ -278,7 +302,11 @@ class StreamService : Service() {
                 val statusBuf = ByteArray(64)
                 while (running.get()) {
                     val n = ar.read(block, 0, block.size)
-                    if (n < 0) throw java.io.IOException("AudioRecord read failed (error $n)")
+                    // A broken AudioRecord is NOT a network problem: throwing
+                    // IllegalStateException here ends the whole capture
+                    // (fail path) instead of the reconnect loop pretending
+                    // a TCP retry will fix it.
+                    if (n < 0) error("AudioRecord read failed (error $n)")
                     if (n != block.size) continue // partial or stopped: skip, never mis-frame
                     if (leaseClosed(tcp)) {
                         // Receiver ended the session; let the caller reconnect.
@@ -368,7 +396,15 @@ class StreamService : Service() {
     }
 
     private fun stopStreaming(reason: String) {
-        if (!running.getAndSet(false)) return
+        val wasStreaming = running.getAndSet(false)
+        if (!wasStreaming) {
+            // Holding foreground (waiting for consent) or already stopped:
+            // just leave the foreground state.
+            StreamState.ui.update { it.copy(running = false, statusLine = "Idle") }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
         Log.i(TAG, "stopping: $reason")
         runCatching { record?.stop() }
         val w = worker
