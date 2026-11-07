@@ -1,0 +1,28 @@
+# PhoneCast receiver — example systemd *user* unit (Linux).
+#
+# Install (replace <PATH-TO-BINARY>):
+#   mkdir -p ~/.config/systemd/user
+#   cp packaging/phonecast-receiver.service ~/.config/systemd/user/
+#   # edit ExecStart= to point at your built binary, e.g.
+#   #   /home/YOU/.cargo/bin/phonecast-receiver
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now phonecast-receiver
+#
+# Or let the receiver install it for you (uses the current config file):
+#   phonecast-receiver --install-autostart
+#
+# Logs:      journalctl --user -u phonecast-receiver -f
+# Remove:    phonecast-receiver --remove-autostart
+
+[Unit]
+Description=PhoneCast audio receiver
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+ExecStart=phonecast-receiver
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

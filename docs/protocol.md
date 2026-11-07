@@ -9,8 +9,30 @@ Encoding everywhere: **little-endian**, unsigned unless noted.
 
 | Channel | Transport | Default port | Purpose |
 |---|---|---|---|
+| Discovery | mDNS/DNS-SD | (multicast 5353) | Advertise receivers on the LAN |
 | Control | TCP | 53000 | Handshake + session lease |
 | Audio | UDP | 53001 | PCM (later Opus) datagrams |
+
+## Discovery (mDNS, milestone 5)
+
+Receivers advertise, one instance per LAN IPv4 interface:
+
+- Service type: `_phonecast._tcp.local.`
+- Instance name: `PhoneCast @ <hostname-label>`
+- SRV target host: `<hostname-label>.local.`; **SRV port = the TCP control
+  port** (the UDP audio port is only carried in TXT, below).
+- TXT keys:
+
+| key | meaning |
+|---|---|
+| `ver` | protocol version this receiver speaks (`"1"`) |
+| `udp` | UDP audio port (decimal) |
+| `auth` | `"1"` if the receiver requires a pairing token, `"0"` = open |
+
+Senders may ignore discovery and connect by typed IP:port — discovery is
+convenience, not part of session establishment. `auth=0` does not mean
+"no handshake": the TCP handshake is always required, the token field is
+simply empty.
 
 The sender opens TCP first, performs the handshake, and keeps the connection
 open for as long as the session should live. Closing it ends the session on
@@ -133,8 +155,9 @@ The wire format does not change for buffering; the receiver's policy:
   discarding whole frames rather than waiting on the capped ratio.
 - `--extra-delay-ms` adds manual playout hold for lip-sync.
 
-## Future milestones touching this document
+## Remaining work touching this document
 
-- M5: pairing token semantics, discovery via mDNS (service `_phonecast._udp`).
-- Later: phone-side Opus encode (NDK libopus; Android's MediaCodec has no
-  Opus encoder). PCM remains the phone default until then.
+- Pairing UX beyond the shared secret (first-run QR / PIN): not scheduled;
+  v1 keeps the manually-configured token model.
+- Phone-side Opus encode (NDK libopus; Android's MediaCodec has no Opus
+  encoder). PCM remains the phone default until then.
