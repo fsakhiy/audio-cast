@@ -1,0 +1,10 @@
+[package]
+name = "phonecast-wire"
+version = "0.1.0"
+edition = "2024"
+description = "PhoneCast v1 wire format: encode/decode for the TCP handshake and UDP audio datagrams"
+
+[dependencies]
+# thiserror (not anyhow): this is a library crate; per project rules anyhow is
+# for the binary, thiserror gives callers matchable error variants.
+thiserror = "2"
