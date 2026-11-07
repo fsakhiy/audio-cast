@@ -149,9 +149,10 @@ fn stream_wav(cli: &Cli, host: &str, file: &std::path::Path) -> Result<()> {
     let samples_per_packet = frame_size as usize * spec.channels as usize;
     let mut packet_buf = vec![0u8; AUDIO_HEADER_SIZE + samples_per_packet * 2];
     let frame_duration = Duration::from_secs_f64(frame_size as f64 / spec.sample_rate as f64);
-    // Give the receiver a head start: 500 ms of audio goes out as a burst
-    // before real-time pacing begins.
-    let start = Instant::now() - Duration::from_millis(500);
+    // Give the receiver a head start: 200 ms of audio goes out as a burst
+    // before real-time pacing begins. (Kept modest: an excess burst only
+    // buys latency, and the receiver discards old frames to catch up.)
+    let start = Instant::now() - Duration::from_millis(200);
 
     let mut sample_slot = vec![0i16; samples_per_packet];
     let mut sequence: u32 = 0;

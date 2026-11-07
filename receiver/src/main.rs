@@ -10,7 +10,10 @@ use anyhow::{Context as _, Result, bail};
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+mod drift;
+mod jitter;
 mod net;
+mod playout;
 mod tone;
 use tone::Tone;
 
@@ -53,6 +56,15 @@ struct Cli {
     #[arg(long, default_value = "")]
     token: String,
 
+    /// Base jitter buffer target in ms (10–200). The buffer grows
+    /// beyond this automatically when network jitter or loss demands it.
+    #[arg(long, default_value_t = 30.0)]
+    jitter_target_ms: f64,
+
+    /// Extra playout delay in ms for lip-sync (0–2000).
+    #[arg(long, default_value_t = 0.0)]
+    extra_delay_ms: f64,
+
     /// Test tone frequency in Hz (tone mode). Must stay below half the sample rate.
     #[arg(long, default_value_t = 440.0)]
     freq: f64,
@@ -94,6 +106,14 @@ fn run() -> Result<()> {
     if cli.tone {
         run_tone(&cli, &device)
     } else {
+        // clap's range parser is awkward for floats; validate here instead,
+        // mirroring how --volume is handled.
+        if !(10.0..=200.0).contains(&cli.jitter_target_ms) {
+            bail!("--jitter-target-ms must be between 10 and 200");
+        }
+        if !(0.0..=2000.0).contains(&cli.extra_delay_ms) {
+            bail!("--extra-delay-ms must be between 0 and 2000");
+        }
         net::run(
             &device,
             &net::ListenArgs {
@@ -101,6 +121,8 @@ fn run() -> Result<()> {
                 tcp_port: cli.tcp_port,
                 udp_port: cli.udp_port,
                 token: cli.token.clone(),
+                jitter_target_ms: cli.jitter_target_ms,
+                extra_delay_ms: cli.extra_delay_ms,
             },
         )
     }
